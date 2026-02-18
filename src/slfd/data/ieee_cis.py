@@ -33,6 +33,37 @@ _NUMERIC_FILL = -999
 
 
 @dataclass
+class IEEECISThreeWaySplit:
+    """Three-way stratified split for E-FD2.
+
+    Required for rigorous evaluation: meta-learners and weight computation
+    use val predictions (out-of-sample for base models). Final evaluation
+    on held-out test set, identical for all treatment arms.
+
+    Attributes
+    ----------
+    X_train : np.ndarray
+        Training features for base model fitting.
+    X_val : np.ndarray
+        Validation features for meta-learner fitting and weight computation.
+    X_test : np.ndarray
+        Held-out test features for final evaluation.
+    y_train, y_val, y_test : np.ndarray
+        Corresponding binary labels (0/1).
+    feature_names : list[str]
+        Feature column names matching X columns.
+    """
+
+    X_train: np.ndarray
+    X_val: np.ndarray
+    X_test: np.ndarray
+    y_train: np.ndarray
+    y_val: np.ndarray
+    y_test: np.ndarray
+    feature_names: list[str]
+
+
+@dataclass
 class IEEECISData:
     """Preprocessed and split IEEE-CIS dataset.
 
@@ -244,6 +275,88 @@ def make_splits(
         X_train=X_train,
         X_test=X_test,
         y_train=y_train,
+        y_test=y_test,
+        feature_names=feature_cols,
+    )
+
+
+def make_three_way_splits(
+    df: pd.DataFrame,
+    train_size: float = 0.6,
+    val_size: float = 0.2,
+    test_size: float = 0.2,
+    seed: int = 42,
+) -> IEEECISThreeWaySplit:
+    """Stratified three-way split: train / val / test.
+
+    Scientific rationale:
+        - Train: fit base models (XGBoost, RF, MLP, IF)
+        - Val: generate out-of-sample predictions → fit meta-learners
+          (arms C, I) and compute weights (arms B, D)
+        - Test: final held-out evaluation, identical for all 9 arms
+
+    All three splits are stratified on the fraud label to preserve
+    the class distribution (~3.5% fraud) in each partition.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Preprocessed dataframe with 'isFraud' column.
+    train_size : float
+        Fraction for training (default 0.6).
+    val_size : float
+        Fraction for validation (default 0.2).
+    test_size : float
+        Fraction for testing (default 0.2).
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    IEEECISThreeWaySplit
+
+    Raises
+    ------
+    ValueError
+        If train_size + val_size + test_size does not sum to 1.
+    """
+    if abs(train_size + val_size + test_size - 1.0) > 1e-9:
+        raise ValueError(
+            f"train_size + val_size + test_size must sum to 1, "
+            f"got {train_size} + {val_size} + {test_size} = "
+            f"{train_size + val_size + test_size}"
+        )
+
+    target = "isFraud"
+    feature_cols = [c for c in df.columns if c != target]
+
+    X = df[feature_cols].values.astype(np.float32)
+    y = df[target].values.astype(np.int32)
+
+    # First split: separate test set
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y,
+        test_size=test_size,
+        random_state=seed,
+        stratify=y,
+    )
+
+    # Second split: separate val from train
+    # val_size relative to the remaining data (temp)
+    val_fraction_of_temp = val_size / (train_size + val_size)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp,
+        test_size=val_fraction_of_temp,
+        random_state=seed,
+        stratify=y_temp,
+    )
+
+    return IEEECISThreeWaySplit(
+        X_train=X_train,
+        X_val=X_val,
+        X_test=X_test,
+        y_train=y_train,
+        y_val=y_val,
         y_test=y_test,
         feature_names=feature_cols,
     )

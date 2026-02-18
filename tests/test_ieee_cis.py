@@ -27,7 +27,9 @@ from slfd.data.ieee_cis import (
     load_raw,
     preprocess,
     make_splits,
+    make_three_way_splits,
     IEEECISData,
+    IEEECISThreeWaySplit,
     DATA_DIR,
 )
 
@@ -223,7 +225,131 @@ class TestMakeSplits:
 
 
 # ===================================================================
-# 4. Real dataset tests (skipped if data not present)
+# 4. Three-way split (train / val / test)
+# ===================================================================
+
+class TestMakeThreeWaySplits:
+    """Stratified three-way split for E-FD2.
+
+    Required for scientific rigor: meta-learners (C, I) and weight
+    computation (B, D) must fit on val predictions, NOT test data.
+    Final evaluation on held-out test set, identical for all 9 arms.
+    """
+
+    def test_returns_three_way_split(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        assert isinstance(data, IEEECISThreeWaySplit)
+
+    def test_has_all_six_arrays(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        assert hasattr(data, "X_train")
+        assert hasattr(data, "y_train")
+        assert hasattr(data, "X_val")
+        assert hasattr(data, "y_val")
+        assert hasattr(data, "X_test")
+        assert hasattr(data, "y_test")
+        assert hasattr(data, "feature_names")
+
+    def test_no_overlap_between_splits(self, mock_data_dir):
+        """Critical: no data leakage between train/val/test."""
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        n_total = len(data.y_train) + len(data.y_val) + len(data.y_test)
+        assert n_total == 500  # all samples accounted for, none duplicated
+
+    def test_default_split_ratios(self, mock_data_dir):
+        """Default: 60% train, 20% val, 20% test."""
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        n = 500
+        assert len(data.y_train) == pytest.approx(n * 0.6, abs=10)
+        assert len(data.y_val) == pytest.approx(n * 0.2, abs=10)
+        assert len(data.y_test) == pytest.approx(n * 0.2, abs=10)
+
+    def test_custom_split_ratios(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(
+            clean, train_size=0.7, val_size=0.15, test_size=0.15, seed=42,
+        )
+        n = 500
+        assert len(data.y_train) == pytest.approx(n * 0.7, abs=10)
+        assert len(data.y_val) == pytest.approx(n * 0.15, abs=10)
+        assert len(data.y_test) == pytest.approx(n * 0.15, abs=10)
+
+    def test_ratios_must_sum_to_one(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        with pytest.raises(ValueError, match="sum to 1"):
+            make_three_way_splits(
+                clean, train_size=0.5, val_size=0.2, test_size=0.1, seed=42,
+            )
+
+    def test_stratified_fraud_rate_all_three(self, mock_data_dir):
+        """Fraud rate should be approximately equal across all three splits."""
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        rate_train = np.mean(data.y_train)
+        rate_val = np.mean(data.y_val)
+        rate_test = np.mean(data.y_test)
+        # All three within 5% of each other
+        assert rate_train == pytest.approx(rate_val, abs=0.05)
+        assert rate_train == pytest.approx(rate_test, abs=0.05)
+
+    def test_feature_names_match(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        n_feat = len(data.feature_names)
+        assert data.X_train.shape[1] == n_feat
+        assert data.X_val.shape[1] == n_feat
+        assert data.X_test.shape[1] == n_feat
+
+    def test_no_target_in_features(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        assert "isFraud" not in data.feature_names
+
+    def test_reproducible(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        d1 = make_three_way_splits(clean, seed=42)
+        d2 = make_three_way_splits(clean, seed=42)
+        np.testing.assert_array_equal(d1.y_train, d2.y_train)
+        np.testing.assert_array_equal(d1.y_val, d2.y_val)
+        np.testing.assert_array_equal(d1.y_test, d2.y_test)
+
+    def test_different_seed_different_split(self, mock_data_dir):
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        d1 = make_three_way_splits(clean, seed=42)
+        d2 = make_three_way_splits(clean, seed=99)
+        # Extremely unlikely to be identical with different seeds
+        assert not np.array_equal(d1.y_test, d2.y_test)
+
+    def test_dtypes(self, mock_data_dir):
+        """Features float32, labels int32 — consistent with make_splits."""
+        raw = load_raw(mock_data_dir)
+        clean = preprocess(raw)
+        data = make_three_way_splits(clean, seed=42)
+        assert data.X_train.dtype == np.float32
+        assert data.X_val.dtype == np.float32
+        assert data.X_test.dtype == np.float32
+        assert data.y_train.dtype == np.int32
+        assert data.y_val.dtype == np.int32
+        assert data.y_test.dtype == np.int32
+
+
+# ===================================================================
+# 5. Real dataset tests (skipped if data not present)
 # ===================================================================
 
 _REAL_DATA = DATA_DIR / "train_transaction.csv"
