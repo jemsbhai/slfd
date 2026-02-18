@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Data (large files — download via scripts)
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.h5
+*.pkl
+
+# Experiment outputs (regenerable) — keep READMEs
+results/**
+!results/README.md
+benchmarks/**
+!benchmarks/README.md
+figures/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Ruff
+.ruff_cache/
