@@ -63,7 +63,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/jsonld-ex/slfd"
+Repository = "https://github.com/jemsbhai/slfd"
 
 [tool.setuptools.packages.find]
 where = ["src"]
