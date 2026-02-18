@@ -50,3 +50,6 @@ desktop.ini
 
 # Ruff
 .ruff_cache/
+
+# Development continuation docs (contain internal paths)
+CONTINUATION.md
