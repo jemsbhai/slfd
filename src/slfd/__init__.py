@@ -5,3 +5,29 @@ with Subjective Logic.
 """
 
 __version__ = "0.1.0"
+
+from slfd.opinion import Opinion
+from slfd.fusion import cumulative_fuse, averaging_fuse, conflict_metric
+from slfd.decay import decay_opinion
+from slfd.trust import trust_discount
+from slfd.decision import (
+    Decision,
+    DecisionResult,
+    ThreeWayDecider,
+    CostMatrix,
+    compute_optimal_thresholds,
+)
+
+__all__ = [
+    "Opinion",
+    "cumulative_fuse",
+    "averaging_fuse",
+    "conflict_metric",
+    "decay_opinion",
+    "trust_discount",
+    "Decision",
+    "DecisionResult",
+    "ThreeWayDecider",
+    "CostMatrix",
+    "compute_optimal_thresholds",
+]
