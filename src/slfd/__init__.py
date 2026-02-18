@@ -10,6 +10,7 @@ from slfd.opinion import Opinion
 from slfd.fusion import cumulative_fuse, averaging_fuse, conflict_metric
 from slfd.decay import decay_opinion
 from slfd.trust import trust_discount
+from slfd.synthetic import FraudScenarioGenerator, FraudDataset
 from slfd.decision import (
     Decision,
     DecisionResult,
@@ -25,6 +26,8 @@ __all__ = [
     "conflict_metric",
     "decay_opinion",
     "trust_discount",
+    "FraudScenarioGenerator",
+    "FraudDataset",
     "Decision",
     "DecisionResult",
     "ThreeWayDecider",
