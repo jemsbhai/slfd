@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
@@ -188,10 +189,17 @@ class MLPFraudModel(FraudModel):
 # ===================================================================
 
 class IsolationForestFraudModel(FraudModel):
-    """Isolation Forest anomaly detector adapted for fraud scoring.
+    """Isolation Forest anomaly detector with Platt-scaling calibration.
 
     Isolation Forest is unsupervised — it learns what's 'normal' and
-    flags anomalies. We map its anomaly score to a fraud probability.
+    flags anomalies. Raw anomaly scores are then calibrated to proper
+    probabilities via Platt scaling (logistic regression on scores vs
+    training labels).
+
+    The original hardcoded sigmoid (scale=5.0) produced near-constant
+    output (~0.877) because the parameters didn't adapt to the actual
+    score distribution. Platt scaling fixes this by learning the
+    mapping from data.
     """
 
     def __init__(self, seed: int = 42) -> None:
@@ -202,22 +210,45 @@ class IsolationForestFraudModel(FraudModel):
             random_state=seed,
             n_jobs=-1,
         )
+        self._calibrator: LogisticRegression | None = None
+        self._seed = seed
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
-        # Isolation Forest is unsupervised — ignores y
+        """Fit Isolation Forest (unsupervised) then Platt-calibrate with labels.
+
+        Two-stage process:
+            1. Fit IF on X (unsupervised, ignores y)
+            2. Get anomaly scores on training data
+            3. Fit logistic regression: score → P(fraud | score)
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Training features.
+        y : np.ndarray
+            Training labels (used only for calibration, not IF fitting).
+        """
+        # Stage 1: unsupervised anomaly detection
         self._model.fit(X)
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Map anomaly scores to fraud probabilities.
+        # Stage 2: Platt scaling — calibrate scores to probabilities
+        raw_scores = self._model.score_samples(X).reshape(-1, 1)
+        self._calibrator = LogisticRegression(
+            random_state=self._seed,
+            max_iter=1000,
+            solver="lbfgs",
+        )
+        self._calibrator.fit(raw_scores, y)
 
-        score_samples() returns negative anomaly scores where
-        more negative = more anomalous. We map to [0, 1] via:
-            p = 1 / (1 + exp(score * scale))
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Map anomaly scores to calibrated fraud probabilities.
+
+        Uses the Platt-scaling logistic regression to convert raw
+        anomaly scores into proper probabilities that reflect the
+        actual fraud likelihood given the score.
         """
-        scores = self._model.score_samples(X)
-        # Sigmoid mapping: more negative scores → higher fraud probability
-        # Scale factor controls the spread
-        probs = 1.0 / (1.0 + np.exp(scores * 5.0))
+        raw_scores = self._model.score_samples(X).reshape(-1, 1)
+        probs = self._calibrator.predict_proba(raw_scores)[:, 1]
         return np.clip(probs, 0.0, 1.0).astype(np.float64)
 
 
