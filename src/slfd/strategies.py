@@ -23,9 +23,12 @@ from dataclasses import dataclass
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
+from sklearn.metrics import roc_auc_score, average_precision_score
+
 from slfd.opinion import Opinion
 from slfd.fusion import cumulative_fuse, conflict_metric
 from slfd.robust import robust_fuse
+from slfd.trust import trust_discount
 from slfd.decision import Decision, ThreeWayDecider
 from slfd.models.ensemble import PredictionSet
 
@@ -499,6 +502,205 @@ def sl_robust_three_way(
         conflicts=conflicts,
         escalation_mask=escalation_mask,
         excluded_counts=excluded_counts,
+    )
+
+
+# ===================================================================
+# Trust weight computation from validation performance
+# ===================================================================
+
+def compute_trust_from_validation(
+    val_pred_set: PredictionSet,
+    val_labels: np.ndarray,
+    metric: str = "roc_auc",
+) -> np.ndarray:
+    """Compute per-model trust weights from validation performance.
+
+    Maps validation discriminative performance to trust ∈ [0, 1] using
+    a principled normalization:
+
+    - **roc_auc** (default): ``trust = clamp((auc - 0.5) / 0.5, 0, 1)``
+      Maps chance-level (AUC=0.5) to zero trust, perfect to full trust.
+    - **pr_auc**: ``trust = clamp(pr_auc / base_rate_normalized, 0, 1)``
+      Uses average precision, normalized so that a random classifier
+      (AP ≈ base_rate) gets near-zero trust.
+
+    Parameters
+    ----------
+    val_pred_set : PredictionSet
+        Validation predictions.
+    val_labels : np.ndarray
+        True validation labels (0/1).
+    metric : str
+        Performance metric: ``"roc_auc"`` or ``"pr_auc"``.
+
+    Returns
+    -------
+    np.ndarray
+        Trust weights ∈ [0, 1], shape ``(n_models,)``.
+
+    Raises
+    ------
+    ValueError
+        If metric is not supported or label length mismatches.
+    """
+    if metric not in ("roc_auc", "pr_auc"):
+        raise ValueError(
+            f"metric must be 'roc_auc' or 'pr_auc', got '{metric}'"
+        )
+
+    n_val = val_pred_set.probabilities.shape[0]
+    if val_labels.shape[0] != n_val:
+        raise ValueError(
+            f"Label length {val_labels.shape[0]} does not match "
+            f"prediction count {n_val}"
+        )
+
+    n_models = val_pred_set.probabilities.shape[1]
+    trust = np.zeros(n_models, dtype=np.float64)
+
+    for j in range(n_models):
+        probs = val_pred_set.probabilities[:, j]
+
+        if metric == "roc_auc":
+            auc = roc_auc_score(val_labels, probs)
+            # Normalize: AUC=0.5 → 0 trust, AUC=1.0 → 1 trust
+            trust[j] = max(0.0, min(1.0, (auc - 0.5) / 0.5))
+
+        elif metric == "pr_auc":
+            ap = average_precision_score(val_labels, probs)
+            # Normalize: AP ≈ base_rate → 0 trust, AP=1.0 → 1 trust
+            base_rate = float(np.mean(val_labels))
+            denom = 1.0 - base_rate
+            if denom < 1e-12:
+                trust[j] = 1.0  # All fraud → every model is "perfect"
+            else:
+                trust[j] = max(0.0, min(1.0, (ap - base_rate) / denom))
+
+    return trust
+
+
+# ===================================================================
+# J: SL Trust-Discounted Cumulative Scores
+# ===================================================================
+
+def sl_trust_cumulative_scores(
+    pred_set: PredictionSet,
+    trust_weights: np.ndarray,
+    base_rate: float = 0.035,
+) -> np.ndarray:
+    """Trust-discounted cumulative SL fusion → expected probability.
+
+    Each model's opinion is discounted by its trust weight before
+    cumulative fusion. Low-trust sources are pushed toward vacuous,
+    reducing their influence on the fused result.
+
+    Parameters
+    ----------
+    pred_set : PredictionSet
+        Per-model predictions.
+    trust_weights : np.ndarray
+        Trust per model ∈ [0, 1], shape ``(n_models,)``.
+    base_rate : float
+        Prior fraud rate for opinion construction.
+
+    Returns
+    -------
+    np.ndarray
+        Fused fraud scores, shape ``(n,)``, values in [0, 1].
+
+    Raises
+    ------
+    ValueError
+        If trust_weights shape mismatches model count.
+    """
+    n_models = pred_set.probabilities.shape[1]
+    if trust_weights.shape != (n_models,):
+        raise ValueError(
+            f"trust_weights must have shape ({n_models},), "
+            f"got {trust_weights.shape}"
+        )
+
+    n_txns = pred_set.probabilities.shape[0]
+    scores = np.zeros(n_txns, dtype=np.float64)
+
+    for i in range(n_txns):
+        opinions = _build_opinions_for_txn(pred_set, i, base_rate)
+        discounted = [
+            trust_discount(op, float(trust_weights[j]))
+            for j, op in enumerate(opinions)
+        ]
+        fused = cumulative_fuse(discounted)
+        scores[i] = fused.expected_probability
+
+    return scores
+
+
+# ===================================================================
+# K: SL Trust-Discounted Three-Way Decision
+# ===================================================================
+
+def sl_trust_three_way(
+    pred_set: PredictionSet,
+    trust_weights: np.ndarray,
+    base_rate: float,
+    decider: ThreeWayDecider,
+) -> ThreeWayFusionResult:
+    """Trust-discounted SL fusion + conflict detection → three-way decision.
+
+    Applies trust discount per model before fusion, then uses the
+    ThreeWayDecider. Conflict is computed on the *discounted* opinions
+    (reflecting the actual evidence entering the fusion).
+
+    Parameters
+    ----------
+    pred_set : PredictionSet
+        Per-model predictions.
+    trust_weights : np.ndarray
+        Trust per model ∈ [0, 1], shape ``(n_models,)``.
+    base_rate : float
+        Prior fraud rate for opinion construction.
+    decider : ThreeWayDecider
+        Decision engine with thresholds.
+
+    Returns
+    -------
+    ThreeWayFusionResult
+    """
+    n_models = pred_set.probabilities.shape[1]
+    if trust_weights.shape != (n_models,):
+        raise ValueError(
+            f"trust_weights must have shape ({n_models},), "
+            f"got {trust_weights.shape}"
+        )
+
+    n_txns = pred_set.probabilities.shape[0]
+    scores = np.zeros(n_txns, dtype=np.float64)
+    decisions = np.empty(n_txns, dtype=object)
+    conflicts = np.zeros(n_txns, dtype=np.float64)
+    escalation_mask = np.zeros(n_txns, dtype=bool)
+
+    for i in range(n_txns):
+        opinions = _build_opinions_for_txn(pred_set, i, base_rate)
+        discounted = [
+            trust_discount(op, float(trust_weights[j]))
+            for j, op in enumerate(opinions)
+        ]
+        fused = cumulative_fuse(discounted)
+        conf = conflict_metric(discounted)
+
+        result = decider.decide(fused, conflict=conf)
+
+        scores[i] = fused.expected_probability
+        decisions[i] = result.decision
+        conflicts[i] = conf
+        escalation_mask[i] = result.decision == Decision.ESCALATE
+
+    return ThreeWayFusionResult(
+        scores=scores,
+        decisions=decisions,
+        conflicts=conflicts,
+        escalation_mask=escalation_mask,
     )
 
 
