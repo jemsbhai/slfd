@@ -51,7 +51,6 @@ desktop.ini
 # Ruff
 .ruff_cache/
 
-# Development continuation docs (contain internal paths)
-CONTINUATION.md
-
+# Internal planning docs (contain local paths, analysis, continuation prompts)
+internal/
 CONTINUATION.md

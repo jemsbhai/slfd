@@ -32,6 +32,7 @@ from slfd.data.ieee_cis import load_raw, preprocess, make_three_way_splits, DATA
 from slfd.experiments.efd2 import EFD2Config, run_efd2, serialize_results
 from slfd.metrics import CostConfig
 from slfd.decision import ThreeWayDecider
+from slfd.results import save_results
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,16 +47,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--n-bootstrap", type=int, default=1000,
                         help="Bootstrap resamples for CIs (default: 1000)")
-    parser.add_argument("--output", type=str,
-                        default=str(_PROJECT_ROOT / "results" / "efd2_results.json"),
-                        help="Output JSON path")
+    parser.add_argument("--output-dir", type=str,
+                        default=str(_PROJECT_ROOT / "results"),
+                        help="Output directory (default: results/)")
+    parser.add_argument("--suffix", type=str, default=None,
+                        help="Optional suffix for result filename (e.g. 'run1')")
     parser.add_argument("--train-size", type=float, default=0.6)
     parser.add_argument("--val-size", type=float, default=0.2)
     parser.add_argument("--test-size", type=float, default=0.2)
     args = parser.parse_args()
 
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.output_dir)
 
     t_start = time.perf_counter()
 
@@ -162,7 +164,7 @@ def main() -> None:
                  ci["arm_a"], ci["arm_b"],
                  ci["observed_diff"], ci["ci_lower"], ci["ci_upper"], sig)
 
-    # --- 8. Serialize ---
+    # --- 8. Serialize and save with timestamped filename ---
     serialized = serialize_results(results)
     serialized["timing"] = {
         "total_seconds": round(time.perf_counter() - t_start, 1),
@@ -174,7 +176,12 @@ def main() -> None:
         "test_size": args.test_size,
     }
 
-    out_path.write_text(json.dumps(serialized, indent=2))
+    out_path = save_results(
+        data=serialized,
+        experiment="efd2",
+        results_dir=out_dir,
+        suffix=args.suffix,
+    )
     log.info("")
     log.info("Results written to %s", out_path)
     log.info("Total time: %.1f seconds", time.perf_counter() - t_start)

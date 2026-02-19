@@ -145,10 +145,10 @@ class TestRunEFD2FromPredictions:
         )
         assert isinstance(results, EFD2Results)
 
-    def test_has_all_nine_arms(self, default_config):
+    def test_has_all_eleven_arms(self, default_config):
         vp, vl, tp, tl = self._make_pred_sets()
         results = run_efd2_from_predictions(vp, vl, tp, tl, default_config)
-        assert len(results.arm_results) == 9
+        assert len(results.arm_results) == 11
 
     def test_arm_names_match_protocol(self, default_config):
         vp, vl, tp, tl = self._make_pred_sets()
@@ -158,6 +158,7 @@ class TestRunEFD2FromPredictions:
             "D_bayesian_model_average", "E_noisy_or",
             "F_sl_cumulative", "G_sl_three_way",
             "H_sl_robust_three_way", "I_confidence_feature",
+            "J_sl_trust_cumulative", "K_sl_trust_three_way",
         }
         actual_names = {r.arm_name for r in results.arm_results}
         assert actual_names == expected_names
@@ -176,10 +177,10 @@ class TestRunEFD2FromPredictions:
             assert arm.expected_cost >= 0.0
 
     def test_three_way_arms_have_escalation(self, default_config):
-        """Arms G, H should have escalation analysis."""
+        """Arms G, H, K should have escalation analysis."""
         vp, vl, tp, tl = self._make_pred_sets()
         results = run_efd2_from_predictions(vp, vl, tp, tl, default_config)
-        three_way_arms = {"G_sl_three_way", "H_sl_robust_three_way"}
+        three_way_arms = {"G_sl_three_way", "H_sl_robust_three_way", "K_sl_trust_three_way"}
         for arm in results.arm_results:
             if arm.arm_name in three_way_arms:
                 assert isinstance(arm.escalation, EscalationAnalysis), (
@@ -193,7 +194,7 @@ class TestRunEFD2FromPredictions:
         scalar_arms = {
             "A_majority_vote", "B_weighted_average", "C_stacking",
             "D_bayesian_model_average", "E_noisy_or", "F_sl_cumulative",
-            "I_confidence_feature",
+            "I_confidence_feature", "J_sl_trust_cumulative",
         }
         for arm in results.arm_results:
             if arm.arm_name in scalar_arms:
@@ -255,10 +256,10 @@ class TestRunEFD2:
         )
         assert isinstance(results, EFD2Results)
 
-    def test_has_all_nine_arms(self, synthetic_data, default_config):
+    def test_has_all_eleven_arms(self, synthetic_data, default_config):
         X_tr, y_tr, X_v, y_v, X_te, y_te = synthetic_data
         results = run_efd2(X_tr, y_tr, X_v, y_v, X_te, y_te, default_config)
-        assert len(results.arm_results) == 9
+        assert len(results.arm_results) == 11
 
     def test_scores_in_valid_range(self, synthetic_data, default_config):
         X_tr, y_tr, X_v, y_v, X_te, y_te = synthetic_data
@@ -324,4 +325,4 @@ class TestSerializeResults:
         out_path.write_text(json.dumps(serialized, indent=2))
         assert out_path.exists()
         loaded = json.loads(out_path.read_text())
-        assert len(loaded["arms"]) == 9
+        assert len(loaded["arms"]) == 11

@@ -1,12 +1,27 @@
 """E-FD2: Multi-Source Fraud Signal Fusion experiment runner.
 
-Orchestrates the full 9-arm fusion experiment:
+Orchestrates the full 11-arm fusion experiment:
     1. Train 4-model ensemble (or accept pre-computed predictions)
     2. Collect validation + test predictions
-    3. Run all 9 fusion strategies (A–I)
-    4. Evaluate each arm on PR-AUC, FPR@TPR, cost, escalation
-    5. Pairwise McNemar's tests and bootstrap CIs
-    6. Package results for serialization
+    3. Compute trust weights from validation performance
+    4. Tune ThreeWayDecider thresholds on validation set
+    5. Run all 11 fusion strategies (A–K)
+    6. Evaluate each arm on PR-AUC, FPR@TPR, cost, escalation
+    7. Pairwise McNemar's tests and bootstrap CIs
+    8. Package results for serialization
+
+Arms:
+    A: Majority vote (scalar baseline)
+    B: Weighted average (scalar baseline)
+    C: Stacking meta-learner (scalar baseline)
+    D: Bayesian model averaging (scalar baseline)
+    E: Noisy-OR (scalar baseline)
+    F: SL cumulative fusion (SL treatment)
+    G: SL three-way decision with tuned thresholds (SL treatment)
+    H: SL robust three-way with tuned thresholds (SL treatment)
+    I: Confidence-as-feature meta-learner (hybrid)
+    J: SL trust-discounted cumulative fusion (SL treatment)
+    K: SL trust-discounted three-way with tuned thresholds (SL treatment)
 
 Two entry points:
     run_efd2()                  — full pipeline (train + predict + evaluate)
@@ -41,7 +56,11 @@ from slfd.strategies import (
     sl_three_way,
     sl_robust_three_way,
     ConfidenceFeatureLearner,
+    compute_trust_from_validation,
+    sl_trust_cumulative_scores,
+    sl_trust_three_way,
 )
+from slfd.experiments.tune_decider import tune_decider_thresholds
 
 
 # ===================================================================
@@ -120,10 +139,16 @@ _SIGNIFICANCE_PAIRS = [
     ("G_sl_three_way", "E_noisy_or"),
     ("H_sl_robust_three_way", "C_stacking"),
     ("I_confidence_feature", "C_stacking"),
+    # Trust-discounted arms vs baselines
+    ("J_sl_trust_cumulative", "C_stacking"),
+    ("J_sl_trust_cumulative", "F_sl_cumulative"),
+    ("K_sl_trust_three_way", "C_stacking"),
+    ("K_sl_trust_three_way", "G_sl_three_way"),
     # SL arms against each other
     ("G_sl_three_way", "F_sl_cumulative"),
     ("H_sl_robust_three_way", "G_sl_three_way"),
     ("I_confidence_feature", "F_sl_cumulative"),
+    ("K_sl_trust_three_way", "J_sl_trust_cumulative"),
 ]
 
 
@@ -186,25 +211,59 @@ def run_efd2_from_predictions(
         test_predictions, base_rate=config.base_rate,
     )
 
-    # G: SL three-way decision
-    g_result = sl_three_way(
-        test_predictions, base_rate=config.base_rate, decider=config.decider,
-    )
-    arm_scores["G_sl_three_way"] = g_result.scores
-    arm_escalation_masks["G_sl_three_way"] = g_result.escalation_mask
-
-    # H: SL robust three-way
-    h_result = sl_robust_three_way(
-        test_predictions, base_rate=config.base_rate,
-        decider=config.decider, robust_threshold=config.robust_threshold,
-    )
-    arm_scores["H_sl_robust_three_way"] = h_result.scores
-    arm_escalation_masks["H_sl_robust_three_way"] = h_result.escalation_mask
-
     # I: Confidence-as-feature meta-learner
     conf_learner = ConfidenceFeatureLearner(seed=config.seed)
     conf_learner.fit(val_predictions, val_labels)
     arm_scores["I_confidence_feature"] = conf_learner.predict(test_predictions)
+
+    # --- Trust computation (validation-based) ---
+    trust_weights = compute_trust_from_validation(
+        val_predictions, val_labels, metric="roc_auc",
+    )
+
+    # --- Threshold tuning on validation set ---
+    # Tune for G (undiscounted) — uses config.decider as initial but searches
+    tuned_g = tune_decider_thresholds(
+        val_predictions, val_labels,
+        base_rate=config.base_rate,
+        cost_config=config.cost_config,
+    )
+    # Tune for K (trust-discounted)
+    tuned_k = tune_decider_thresholds(
+        val_predictions, val_labels,
+        base_rate=config.base_rate,
+        cost_config=config.cost_config,
+        trust_weights=trust_weights,
+    )
+
+    # G_tuned: Re-run G with tuned thresholds
+    g_tuned_result = sl_three_way(
+        test_predictions, base_rate=config.base_rate,
+        decider=tuned_g.best_decider,
+    )
+    arm_scores["G_sl_three_way"] = g_tuned_result.scores
+    arm_escalation_masks["G_sl_three_way"] = g_tuned_result.escalation_mask
+
+    # H: Re-run with tuned thresholds too
+    h_tuned_result = sl_robust_three_way(
+        test_predictions, base_rate=config.base_rate,
+        decider=tuned_g.best_decider, robust_threshold=config.robust_threshold,
+    )
+    arm_scores["H_sl_robust_three_way"] = h_tuned_result.scores
+    arm_escalation_masks["H_sl_robust_three_way"] = h_tuned_result.escalation_mask
+
+    # J: Trust-discounted cumulative scores
+    arm_scores["J_sl_trust_cumulative"] = sl_trust_cumulative_scores(
+        test_predictions, trust_weights, base_rate=config.base_rate,
+    )
+
+    # K: Trust-discounted three-way with tuned thresholds
+    k_result = sl_trust_three_way(
+        test_predictions, trust_weights,
+        base_rate=config.base_rate, decider=tuned_k.best_decider,
+    )
+    arm_scores["K_sl_trust_three_way"] = k_result.scores
+    arm_escalation_masks["K_sl_trust_three_way"] = k_result.escalation_mask
 
     # --- Evaluate each arm ---
     arm_results: list[ArmResult] = []
@@ -240,6 +299,12 @@ def run_efd2_from_predictions(
         "n_bootstrap": config.n_bootstrap,
         "fraud_rate_test": float(np.mean(test_labels)),
         "fraud_rate_val": float(np.mean(val_labels)),
+        "trust_weights": {
+            name: float(tw)
+            for name, tw in zip(test_predictions.model_names, trust_weights)
+        },
+        "tuned_thresholds_g": tuned_g.to_dict(),
+        "tuned_thresholds_k": tuned_k.to_dict(),
     }
 
     return EFD2Results(
